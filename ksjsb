@@ -1,0 +1,867 @@
+// 快手极速版自动任务脚本 - 适用于青龙面板
+// 更新日期: 2025-07-28
+// 支持签到、观看视频、开宝箱、看广告等任务
+// 集成自动接口更新和签名功能
+
+const $ = new Env('快手极速版');
+const notify = $.isNode() ? require('./sendNotify') : '';
+const fs = $.isNode() ? require('fs') : '';
+const path = $.isNode() ? require('path') : '';
+
+// 配置信息
+const config = {
+    // 快手极速版Cookie，可填入多个
+    cookies: [
+        '', // 第一个账号Cookie
+        ''  // 第二个账号Cookie（可添加更多）
+    ],
+    // 任务配置
+    taskConfig: {
+        watchVideoCount: 30,      // 观看视频数量
+        watchVideoInterval: 5000, // 观看视频间隔(毫秒)
+        openBoxCount: 5,          // 开宝箱次数
+        watchAdCount: 10,         // 观看广告数量
+        minWaitTime: 3000,        // 最小等待时间(毫秒)
+        maxWaitTime: 8000         // 最大等待时间(毫秒)
+    },
+    // 自动更新配置
+    autoUpdate: {
+        enable: true,             // 启用自动更新
+        checkInterval: 86400000,  // 检查间隔(毫秒)，默认1天
+        repoUrl: 'https://gitee.com/your-repo/kuaishou-script/raw/main/ks_speed.js', // 脚本仓库地址
+        localPath: '/ql/scripts/ks_speed.js'  // 本地脚本路径
+    },
+    // 接口配置
+    apiConfig: {
+        baseUrl: 'https://api.kuaishouzt.com',
+        version: '10.16.30.31870',
+        os: 'android',
+        deviceId: 'KS' + Math.random().toString(36).substr(2, 15).toUpperCase()
+    }
+};
+
+// 全局变量
+let currentAccount = 0;
+let totalPoints = 0;
+let todayEarnedPoints = 0;
+let isFirstLogin = false;
+let apiConfig = config.apiConfig;
+
+// 主函数
+async function main() {
+    $.log(`开始执行快手极速版任务，共 ${config.cookies.length} 个账号`);
+    
+    // 检查脚本更新
+    if (config.autoUpdate.enable) {
+        await checkScriptUpdate();
+    }
+    
+    for (let i = 0; i < config.cookies.length; i++) {
+        currentAccount = i + 1;
+        $.log(`\n开始处理第 ${currentAccount} 个账号`);
+        
+        if (!config.cookies[i]) {
+            $.log(`第 ${currentAccount} 个账号Cookie为空，跳过`);
+            continue;
+        }
+        
+        await handleAccount(config.cookies[i]);
+        await randomWait();
+    }
+    
+    await summary();
+    await notifyResult();
+    $.done();
+}
+
+// 处理单个账号
+async function handleAccount(cookie) {
+    try {
+        // 登录检查
+        const loginResult = await checkLogin(cookie);
+        if (!loginResult.success) {
+            $.log(`第 ${currentAccount} 个账号登录失败: ${loginResult.message}`);
+            return;
+        }
+        
+        // 获取用户信息
+        const userInfo = await getUserInfo(cookie);
+        if (!userInfo) {
+            $.log(`第 ${currentAccount} 个账号获取用户信息失败`);
+            return;
+        }
+        
+        $.log(`欢迎回来，${userInfo.nickname}`);
+        $.log(`当前金币: ${userInfo.goldCoins}`);
+        totalPoints += parseInt(userInfo.goldCoins);
+        
+        // 执行签到
+        const signResult = await doSignIn(cookie);
+        if (signResult.success) {
+            $.log(`签到成功，获得 ${signResult.reward} 金币`);
+            todayEarnedPoints += parseInt(signResult.reward);
+            isFirstLogin = signResult.isFirstLogin;
+        } else {
+            $.log(`签到失败: ${signResult.message}`);
+        }
+        
+        // 观看视频任务
+        if (config.taskConfig.watchVideoCount > 0) {
+            $.log(`开始执行观看视频任务，目标 ${config.taskConfig.watchVideoCount} 个`);
+            const watchResult = await watchVideos(cookie, config.taskConfig.watchVideoCount);
+            $.log(`观看视频任务完成，共获得 ${watchResult} 金币`);
+            todayEarnedPoints += parseInt(watchResult);
+        }
+        
+        // 开宝箱任务
+        if (config.taskConfig.openBoxCount > 0) {
+            $.log(`开始执行开宝箱任务，目标 ${config.taskConfig.openBoxCount} 次`);
+            const boxResult = await openBoxes(cookie, config.taskConfig.openBoxCount);
+            $.log(`开宝箱任务完成，共获得 ${boxResult} 金币`);
+            todayEarnedPoints += parseInt(boxResult);
+        }
+        
+        // 看广告任务
+        if (config.taskConfig.watchAdCount > 0) {
+            $.log(`开始执行看广告任务，目标 ${config.taskConfig.watchAdCount} 个`);
+            const adResult = await watchAds(cookie, config.taskConfig.watchAdCount);
+            $.log(`看广告任务完成，共获得 ${adResult} 金币`);
+            todayEarnedPoints += parseInt(adResult);
+        }
+        
+        // 其他任务...
+        
+    } catch (error) {
+        $.log(`处理账号时发生错误: ${error.message}`);
+    }
+}
+
+// 登录检查
+async function checkLogin(cookie) {
+    try {
+        const options = await generateRequestOptions({
+            url: '/rest/n/feed/profile',
+            method: 'GET',
+            headers: {
+                'Cookie': cookie,
+                'Referer': 'https://live.kuaishou.com/',
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Content-Type': 'application/json',
+                'Origin': 'https://live.kuaishou.com'
+            }
+        });
+        
+        const response = await $.axios(options);
+        if (response.data.result === 1) {
+            return { success: true, message: '登录成功' };
+        } else {
+            return { success: false, message: response.data.error_msg || '登录失败' };
+        }
+    } catch (error) {
+        return { success: false, message: error.message || '请求异常' };
+    }
+}
+
+// 获取用户信息
+async function getUserInfo(cookie) {
+    try {
+        const options = await generateRequestOptions({
+            url: '/rest/n/user/info',
+            method: 'GET',
+            headers: {
+                'Cookie': cookie,
+                'Referer': 'https://live.kuaishou.com/',
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Content-Type': 'application/json',
+                'Origin': 'https://live.kuaishou.com'
+            }
+        });
+        
+        const response = await $.axios(options);
+        if (response.data.result === 1 && response.data.user) {
+            return {
+                nickname: response.data.user.nickname,
+                goldCoins: response.data.user.goldCoins || 0
+            };
+        }
+        return null;
+    } catch (error) {
+        $.log(`获取用户信息失败: ${error.message}`);
+        return null;
+    }
+}
+
+// 签到
+async function doSignIn(cookie) {
+    try {
+        const options = await generateRequestOptions({
+            url: '/rest/n/activity/task/signIn',
+            method: 'POST',
+            headers: {
+                'Cookie': cookie,
+                'Referer': 'https://live.kuaishou.com/',
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Content-Type': 'application/json',
+                'Origin': 'https://live.kuaishou.com'
+            },
+            data: {
+                version: apiConfig.version,
+                os: apiConfig.os,
+                deviceId: apiConfig.deviceId
+            }
+        });
+        
+        const response = await $.axios(options);
+        if (response.data.result === 1) {
+            return {
+                success: true,
+                reward: response.data.rewardCoins || 0,
+                isFirstLogin: response.data.isFirstLogin || false
+            };
+        } else {
+            return {
+                success: false,
+                message: response.data.error_msg || '签到失败'
+            };
+        }
+    } catch (error) {
+        return {
+            success: false,
+            message: error.message || '签到请求异常'
+        };
+    }
+}
+
+// 观看视频
+async function watchVideos(cookie, count) {
+    let totalRewards = 0;
+    
+    for (let i = 1; i <= count; i++) {
+        $.log(`正在观看第 ${i}/${count} 个视频...`);
+        
+        try {
+            // 获取视频列表
+            const videoList = await getVideoList(cookie);
+            if (!videoList || videoList.length === 0) {
+                $.log(`获取视频列表失败，跳过此次观看`);
+                continue;
+            }
+            
+            // 随机选择一个视频
+            const randomVideo = videoList[Math.floor(Math.random() * videoList.length)];
+            
+            // 模拟观看视频
+            const watchResult = await watchVideo(cookie, randomVideo);
+            if (watchResult.success) {
+                totalRewards += watchResult.reward;
+                $.log(`观看完成，获得 ${watchResult.reward} 金币`);
+            } else {
+                $.log(`观看失败: ${watchResult.message}`);
+            }
+        } catch (error) {
+            $.log(`观看视频时出错: ${error.message}`);
+        }
+        
+        // 随机等待，模拟真实用户
+        await randomWait(config.taskConfig.watchVideoInterval);
+    }
+    
+    return totalRewards;
+}
+
+// 获取视频列表
+async function getVideoList(cookie) {
+    try {
+        const options = await generateRequestOptions({
+            url: '/rest/n/feed/hot',
+            method: 'POST',
+            headers: {
+                'Cookie': cookie,
+                'Referer': 'https://live.kuaishou.com/',
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Content-Type': 'application/json',
+                'Origin': 'https://live.kuaishou.com'
+            },
+            data: {
+                count: 20,
+                pcursor: '',
+                type: 7,
+                version: apiConfig.version,
+                os: apiConfig.os,
+                deviceId: apiConfig.deviceId
+            }
+        });
+        
+        const response = await $.axios(options);
+        if (response.data.result === 1 && response.data.feeds && response.data.feeds.length > 0) {
+            return response.data.feeds.map(feed => ({
+                videoId: feed.photo.id,
+                duration: feed.photo.duration || 15
+            }));
+        }
+        return [];
+    } catch (error) {
+        $.log(`获取视频列表失败: ${error.message}`);
+        return [];
+    }
+}
+
+// 观看单个视频
+async function watchVideo(cookie, video) {
+    try {
+        // 随机观看时间
+        const watchTime = Math.min(video.duration, Math.floor(Math.random() * 15) + 10);
+        
+        const options = await generateRequestOptions({
+            url: '/rest/n/video/task/reward',
+            method: 'POST',
+            headers: {
+                'Cookie': cookie,
+                'Referer': 'https://live.kuaishou.com/',
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Content-Type': 'application/json',
+                'Origin': 'https://live.kuaishou.com'
+            },
+            data: {
+                videoId: video.videoId,
+                watchTime: watchTime,
+                version: apiConfig.version,
+                os: apiConfig.os,
+                deviceId: apiConfig.deviceId
+            }
+        });
+        
+        const response = await $.axios(options);
+        if (response.data.result === 1) {
+            return {
+                success: true,
+                reward: response.data.rewardCoins || 0
+            };
+        } else {
+            return {
+                success: false,
+                message: response.data.error_msg || '未知错误'
+            };
+        }
+    } catch (error) {
+        return {
+            success: false,
+            message: error.message || '请求异常'
+        };
+    }
+}
+
+// 开宝箱
+async function openBoxes(cookie, count) {
+    let totalRewards = 0;
+    
+    for (let i = 1; i <= count; i++) {
+        $.log(`正在开第 ${i}/${count} 个宝箱...`);
+        
+        try {
+            // 检查宝箱状态
+            const boxStatus = await checkBoxStatus(cookie);
+            if (!boxStatus.canOpen) {
+                $.log(`宝箱暂时无法开启: ${boxStatus.message || '未知原因'}`);
+                break;
+            }
+            
+            // 开宝箱
+            const openResult = await openBox(cookie);
+            if (openResult.success) {
+                totalRewards += openResult.reward;
+                $.log(`宝箱开启成功，获得 ${openResult.reward} 金币`);
+            } else {
+                $.log(`宝箱开启失败: ${openResult.message}`);
+            }
+        } catch (error) {
+            $.log(`开宝箱时出错: ${error.message}`);
+        }
+        
+        // 随机等待
+        await randomWait();
+    }
+    
+    return totalRewards;
+}
+
+// 检查宝箱状态
+async function checkBoxStatus(cookie) {
+    try {
+        const options = await generateRequestOptions({
+            url: '/rest/n/task/treasureBox/status',
+            method: 'GET',
+            headers: {
+                'Cookie': cookie,
+                'Referer': 'https://live.kuaishou.com/',
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Content-Type': 'application/json',
+                'Origin': 'https://live.kuaishou.com'
+            }
+        });
+        
+        const response = await $.axios(options);
+        if (response.data.result === 1) {
+            return {
+                canOpen: response.data.canOpen || false,
+                message: response.data.message
+            };
+        }
+        return { canOpen: false, message: '获取宝箱状态失败' };
+    } catch (error) {
+        return { canOpen: false, message: error.message || '请求异常' };
+    }
+}
+
+// 开宝箱
+async function openBox(cookie) {
+    try {
+        const options = await generateRequestOptions({
+            url: '/rest/n/task/treasureBox/open',
+            method: 'POST',
+            headers: {
+                'Cookie': cookie,
+                'Referer': 'https://live.kuaishou.com/',
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Content-Type': 'application/json',
+                'Origin': 'https://live.kuaishou.com'
+            },
+            data: {
+                version: apiConfig.version,
+                os: apiConfig.os,
+                deviceId: apiConfig.deviceId
+            }
+        });
+        
+        const response = await $.axios(options);
+        if (response.data.result === 1) {
+            return {
+                success: true,
+                reward: response.data.rewardCoins || 0
+            };
+        } else {
+            return {
+                success: false,
+                message: response.data.error_msg || '未知错误'
+            };
+        }
+    } catch (error) {
+        return {
+            success: false,
+            message: error.message || '请求异常'
+        };
+    }
+}
+
+// 看广告
+async function watchAds(cookie, count) {
+    let totalRewards = 0;
+    
+    for (let i = 1; i <= count; i++) {
+        $.log(`正在观看第 ${i}/${count} 个广告...`);
+        
+        try {
+            // 检查是否有可观看的广告
+            const adAvailable = await checkAdAvailability(cookie);
+            if (!adAvailable) {
+                $.log(`没有可观看的广告，跳过`);
+                break;
+            }
+            
+            // 获取广告列表
+            const adList = await getAdList(cookie);
+            if (!adList || adList.length === 0) {
+                $.log(`获取广告列表失败，跳过此次观看`);
+                continue;
+            }
+            
+            // 随机选择一个广告
+            const randomAd = adList[Math.floor(Math.random() * adList.length)];
+            
+            // 观看广告
+            const watchResult = await watchAd(cookie, randomAd);
+            if (watchResult.success) {
+                totalRewards += watchResult.reward;
+                $.log(`广告观看完成，获得 ${watchResult.reward} 金币`);
+            } else {
+                $.log(`广告观看失败: ${watchResult.message}`);
+            }
+        } catch (error) {
+            $.log(`观看广告时出错: ${error.message}`);
+        }
+        
+        // 随机等待，模拟真实用户观看广告后的操作
+        await randomWait(config.taskConfig.watchVideoInterval * 2);
+    }
+    
+    return totalRewards;
+}
+
+// 检查是否有可观看的广告
+async function checkAdAvailability(cookie) {
+    try {
+        const options = await generateRequestOptions({
+            url: '/rest/n/activity/task/ad/availability',
+            method: 'GET',
+            headers: {
+                'Cookie': cookie,
+                'Referer': 'https://live.kuaishou.com/',
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Content-Type': 'application/json',
+                'Origin': 'https://live.kuaishou.com'
+            }
+        });
+        
+        const response = await $.axios(options);
+        return response.data.result === 1 && response.data.available;
+    } catch (error) {
+        $.log(`检查广告可用性失败: ${error.message}`);
+        return false;
+    }
+}
+
+// 获取广告列表
+async function getAdList(cookie) {
+    try {
+        const options = await generateRequestOptions({
+            url: '/rest/n/activity/task/ad/list',
+            method: 'POST',
+            headers: {
+                'Cookie': cookie,
+                'Referer': 'https://live.kuaishou.com/',
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Content-Type': 'application/json',
+                'Origin': 'https://live.kuaishou.com'
+            },
+            data: {
+                version: apiConfig.version,
+                os: apiConfig.os,
+                deviceId: apiConfig.deviceId
+            }
+        });
+        
+        const response = await $.axios(options);
+        if (response.data.result === 1 && response.data.ads && response.data.ads.length > 0) {
+            return response.data.ads.map(ad => ({
+                adId: ad.adId,
+                duration: ad.duration || 30,
+                rewardCoins: ad.rewardCoins || 0
+            }));
+        }
+        return [];
+    } catch (error) {
+        $.log(`获取广告列表失败: ${error.message}`);
+        return [];
+    }
+}
+
+// 观看单个广告
+async function watchAd(cookie, ad) {
+    try {
+        // 记录广告开始观看
+        const startOptions = await generateRequestOptions({
+            url: '/rest/n/activity/task/ad/start',
+            method: 'POST',
+            headers: {
+                'Cookie': cookie,
+                'Referer': 'https://live.kuaishou.com/',
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Content-Type': 'application/json',
+                'Origin': 'https://live.kuaishou.com'
+            },
+            data: {
+                adId: ad.adId,
+                version: apiConfig.version,
+                os: apiConfig.os,
+                deviceId: apiConfig.deviceId
+            }
+        });
+        
+        await $.axios(startOptions);
+        
+        // 模拟观看广告
+        await randomWait(ad.duration * 1000);
+        
+        // 记录广告观看完成
+        const finishOptions = await generateRequestOptions({
+            url: '/rest/n/activity/task/ad/finish',
+            method: 'POST',
+            headers: {
+                'Cookie': cookie,
+                'Referer': 'https://live.kuaishou.com/',
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Content-Type': 'application/json',
+                'Origin': 'https://live.kuaishou.com'
+            },
+            data: {
+                adId: ad.adId,
+                watchTime: ad.duration,
+                version: apiConfig.version,
+                os: apiConfig.os,
+                deviceId: apiConfig.deviceId
+            }
+        });
+        
+        const response = await $.axios(finishOptions);
+        if (response.data.result === 1) {
+            return {
+                success: true,
+                reward: response.data.rewardCoins || ad.rewardCoins || 0
+            };
+        } else {
+            return {
+                success: false,
+                message: response.data.error_msg || '未知错误'
+            };
+        }
+    } catch (error) {
+        return {
+            success: false,
+            message: error.message || '请求异常'
+        };
+    }
+}
+
+// 生成请求选项（包含签名）
+async function generateRequestOptions(options) {
+    // 合并基础URL
+    options.url = apiConfig.baseUrl + options.url;
+    
+    // 添加通用请求头
+    options.headers = {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Mobile/15E148 Safari/604.1',
+        ...options.headers
+    };
+    
+    // 生成签名
+    const timestamp = Date.now();
+    const nonce = Math.random().toString(36).substr(2, 10);
+    
+    // 准备签名数据
+    let signData = {
+        timestamp,
+        nonce,
+        version: apiConfig.version,
+        os: apiConfig.os,
+        deviceId: apiConfig.deviceId
+    };
+    
+    // 如果有请求数据，加入签名
+    if (options.data) {
+        signData = { ...signData, ...options.data };
+    }
+    
+    // 生成签名（这里使用简化版，实际应用中可能需要更复杂的签名算法）
+    const sign = generateSign(signData);
+    
+    // 添加签名相关参数到请求头或数据
+    if (options.method === 'GET') {
+        // 对于GET请求，添加到URL参数
+        const queryString = new URLSearchParams({ ...signData, sign }).toString();
+        options.url += (options.url.includes('?') ? '&' : '?') + queryString;
+    } else {
+        // 对于POST请求，添加到请求体
+        options.data = { ...options.data, timestamp, nonce, sign };
+    }
+    
+    return options;
+}
+
+// 生成签名（简化版）
+function generateSign(data) {
+    // 实际应用中可能需要更复杂的签名算法
+    // 这里仅作为示例，将所有参数按字母排序后拼接，再加上密钥，最后MD5
+    const sortedKeys = Object.keys(data).sort();
+    let signStr = '';
+    
+    sortedKeys.forEach(key => {
+        signStr += `${key}=${data[key]}&`;
+    });
+    
+    // 添加密钥（实际应用中应从配置或环境变量获取）
+    signStr += 'your_secret_key';
+    
+    // 简单的哈希处理（实际应用中应使用MD5或SHA-256等）
+    let hash = 0;
+    for (let i = 0; i < signStr.length; i++) {
+        const char = signStr.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash |= 0; // Convert to 32bit integer
+    }
+    
+    return Math.abs(hash).toString(16);
+}
+
+// 检查脚本更新
+async function checkScriptUpdate() {
+    try {
+        // 检查上次更新时间
+        const lastUpdateTime = await getLastUpdateTime();
+        const now = Date.now();
+        
+        // 如果距离上次检查不足设定的间隔时间，则不检查
+        if (now - lastUpdateTime < config.autoUpdate.checkInterval) {
+            $.log(`距离上次检查更新时间不足，跳过更新检查`);
+            return;
+        }
+        
+        $.log(`开始检查脚本更新...`);
+        
+        // 获取最新脚本
+        const options = {
+            url: config.autoUpdate.repoUrl,
+            method: 'GET',
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+        };
+        
+        const response = await $.axios(options);
+        const latestScript = response.data;
+        
+        // 读取当前脚本
+        const currentScript = fs.readFileSync(config.autoUpdate.localPath, 'utf8');
+        
+        // 比较脚本内容
+        if (latestScript !== currentScript) {
+            $.log(`发现新版本脚本，开始更新...`);
+            
+            // 保存新版本脚本
+            fs.writeFileSync(config.autoUpdate.localPath, latestScript);
+            
+            // 更新上次检查时间
+            await saveLastUpdateTime(now);
+            
+            $.log(`脚本更新成功！下次运行将使用新版本。`);
+            
+            // 发送通知
+            if (notify) {
+                await notify('快手极速版脚本更新通知', '脚本已自动更新到最新版本，请留意更新内容。');
+            }
+        } else {
+            $.log(`脚本已是最新版本`);
+            
+            // 更新上次检查时间
+            await saveLastUpdateTime(now);
+        }
+    } catch (error) {
+        $.log(`检查脚本更新失败: ${error.message}`);
+    }
+}
+
+// 获取上次更新时间
+async function getLastUpdateTime() {
+    try {
+        const filePath = path.join(path.dirname(config.autoUpdate.localPath), 'last_update_time.txt');
+        if (fs.existsSync(filePath)) {
+            const content = fs.readFileSync(filePath, 'utf8');
+            return parseInt(content) || 0;
+        }
+        return 0;
+    } catch (error) {
+        return 0;
+    }
+}
+
+// 保存上次更新时间
+async function saveLastUpdateTime(time) {
+    try {
+        const filePath = path.join(path.dirname(config.autoUpdate.localPath), 'last_update_time.txt');
+        fs.writeFileSync(filePath, time.toString());
+    } catch (error) {
+        $.log(`保存上次更新时间失败: ${error.message}`);
+    }
+}
+
+// 随机生成设备ID
+function generateDeviceId() {
+    return apiConfig.deviceId;
+}
+
+// 随机等待
+async function randomWait(baseTime = 0) {
+    const waitTime = baseTime + Math.floor(Math.random() * (config.taskConfig.maxWaitTime - config.taskConfig.minWaitTime)) + config.taskConfig.minWaitTime;
+    return new Promise(resolve => setTimeout(resolve, waitTime));
+}
+
+// 任务总结
+async function summary() {
+    $.log(`\n===== 任务总结 =====`);
+    $.log(`共处理 ${config.cookies.length} 个账号`);
+    $.log(`总金币数: ${totalPoints}`);
+    $.log(`今日赚取金币: ${todayEarnedPoints}`);
+    
+    if (isFirstLogin) {
+        $.log(`🎉 今日首次登录，获得额外奖励!`);
+    }
+}
+
+// 发送通知
+async function notifyResult() {
+    if (!notify) return;
+    
+    const title = '快手极速版任务完成';
+    let message = `共处理 ${config.cookies.length} 个账号\n`;
+    message += `总金币数: ${totalPoints}\n`;
+    message += `今日赚取金币: ${todayEarnedPoints}\n`;
+    
+    if (isFirstLogin) {
+        message += `🎉 今日首次登录，获得额外奖励!\n`;
+    }
+    
+    await notify(title, message);
+}
+
+// 环境类，兼容Node和JavaScript
+class Env {
+    constructor(name) {
+        this.name = name;
+        this.isNode = typeof module !== 'undefined' && module.exports;
+        this.logs = [];
+    }
+    
+    log(...args) {
+        const log = args.join(' ');
+        console.log(log);
+        this.logs.push(log);
+    }
+    
+    error(...args) {
+        const log = args.join(' ');
+        console.error(log);
+        this.logs.push(log);
+    }
+    
+    done() {
+        console.log(`\n${this.name} 任务执行完毕`);
+    }
+    
+    axios(options) {
+        if (this.isNode) {
+            return require('axios')(options);
+        } else {
+            return fetch(options.url, {
+                method: options.method || 'GET',
+                headers: options.headers,
+                body: options.data ? JSON.stringify(options.data) : undefined
+            }).then(res => res.json());
+        }
+    }
+}
+
+// 执行主函数
+main().catch(error => {
+    $.log(`执行过程中发生错误: ${error.message}`);
+    $.done();
+});    
